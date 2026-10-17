@@ -10,4 +10,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ping health endpoint
-        run: curl --fail --silent --show-error --max-time 30 https://live-option-chain.onrender.com/health
+        run: |
+          curl --fail --silent --show-error --max-time 30 https://loca-option-chain.onrender.com/health
+          curl --fail --silent --show-error --max-time 30 https://live-option-chain.onrender.com/health || true
