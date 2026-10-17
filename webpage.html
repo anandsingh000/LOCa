@@ -96,6 +96,21 @@
             white-space: nowrap;
         }
 
+        #optionChainTable table tbody tr {
+            cursor: pointer;
+        }
+
+        #optionChainTable table tbody tr:hover td,
+        #optionChainTable table tbody tr:hover th {
+            background-color: #fff8d6 !important;
+        }
+
+        #optionChainTable table tbody tr.option-chain-row-selected td,
+        #optionChainTable table tbody tr.option-chain-row-selected th {
+            background-color: #ffe066 !important;
+            box-shadow: inset 0 2px 0 #b8860b, inset 0 -2px 0 #b8860b;
+        }
+
         .column-resize-handle {
             position: absolute;
             z-index: 5;
@@ -204,6 +219,7 @@
         let activeIndex = null;
         let snapshotRequestNumber = 0;
         let autoRefreshTimer = null;
+        let selectedStrikeKey = null;
 
         function renderPcr(items) {
             const html = (items || []).map((item) =>
@@ -425,6 +441,59 @@
             document.getElementById("table-tools").style.display = "block";
         }
 
+        function getStrikeColumnIndex(table) {
+            return Array.from(table.querySelectorAll("thead th")).findIndex(
+                (header) => header.textContent.trim().toUpperCase() === "STRIKE"
+            );
+        }
+
+        function getRowStrikeKey(row, table) {
+            const strikeColumnIndex = getStrikeColumnIndex(table);
+            if (strikeColumnIndex < 0 || !row.children[strikeColumnIndex]) {
+                return null;
+            }
+            const text = row.children[strikeColumnIndex].textContent.trim();
+            const number = text.match(/[0-9][0-9,]*/);
+            return number ? number[0].replace(/,/g, "") : text;
+        }
+
+        function selectOptionChainRow(row, table) {
+            table.querySelectorAll("tbody tr.option-chain-row-selected")
+                .forEach((selectedRow) => {
+                    selectedRow.classList.remove("option-chain-row-selected");
+                    selectedRow.setAttribute("aria-selected", "false");
+                });
+            row.classList.add("option-chain-row-selected");
+            row.setAttribute("aria-selected", "true");
+            selectedStrikeKey = getRowStrikeKey(row, table);
+        }
+
+        function enableRowSelection() {
+            const table = document.querySelector("#optionChainTable table");
+            if (!table) {
+                return;
+            }
+
+            table.querySelectorAll("tbody tr").forEach((row) => {
+                row.setAttribute("aria-selected", "false");
+                row.addEventListener("click", () => {
+                    selectOptionChainRow(row, table);
+                });
+                row.addEventListener("keydown", (event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        selectOptionChainRow(row, table);
+                    }
+                });
+                row.tabIndex = 0;
+
+                if (selectedStrikeKey &&
+                    getRowStrikeKey(row, table) === selectedStrikeKey) {
+                    selectOptionChainRow(row, table);
+                }
+            });
+        }
+
         function resetColumnWidths() {
             if (!activeTable || !activeTableIndex) {
                 return;
@@ -473,6 +542,7 @@
                     document.getElementById("optionChainTable").innerHTML =
                         snapshot.table_html;
                     setupResizableColumns(endpoint);
+                    enableRowSelection();
                     renderPcr(snapshot.pcr);
                     setLiveStatus(
                         formatUpdatedAt(snapshot) +
