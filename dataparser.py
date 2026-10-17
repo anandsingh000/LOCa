@@ -375,4 +375,6 @@ def raw_to_dataframe(json_obj):
 
 
 def pcr(index):
-  return snapshot(index)["pcr"]
+  json_obj = _option_chain_json(index)
+  underlying = _underlying_value(json_obj, index)
+  return _pcr_from_dataframe(raw_to_dataframe(json_obj), underlying)
