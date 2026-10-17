@@ -1,3 +1,5 @@
+import math
+
 import dataparser as oc
 import pandas as pd
 from matplotlib import *
@@ -60,6 +62,12 @@ def _format_strike(value, strike_markers):
   )
 
 
+def _format_volume_lakh(value):
+  """Display volume as rounded Indian lakhs without changing calculations."""
+  lakhs = math.floor(float(value) / 100000 + 0.5)
+  return f"{lakhs} lakh"
+
+
 def prettier(df, index="NIFTY", nifty_value=None, strike_markers=None):
   strike_markers = strike_markers or {}
   if nifty_value is None:
@@ -97,6 +105,8 @@ def prettier(df, index="NIFTY", nifty_value=None, strike_markers=None):
       decimal='.',
       formatter={
           'STRIKE': lambda value: _format_strike(value, strike_markers),
+          'VOLUME_c': _format_volume_lakh,
+          'VOLUME_p': _format_volume_lakh,
       },
   ).set_properties(**{
                              'text-align': 'center',
