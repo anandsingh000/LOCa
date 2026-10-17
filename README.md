@@ -38,5 +38,9 @@ available local port.
 ## Render deployment
 
 `render.yaml` and `Procfile` are included for a Render web service. Connect
-the GitHub repository in Render and deploy the `loca-option-chain` service;
+the GitHub repository in Render and deploy the `live-option-chain` service;
 Render supplies the `PORT` environment variable automatically.
+
+The repository also includes a GitHub Actions health ping every 10 minutes to
+reduce free-plan sleeping. Render can still restart or suspend a free service;
+guaranteed always-on availability requires a paid always-on instance.
