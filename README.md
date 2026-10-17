@@ -2,6 +2,11 @@
 # Description
 Live Option Chain Analyzer data fetcher, data pipeline, and online portal to derive tabular analysis on option chain data from NSE India and display trends for NIFTY, BANKNIFTY, and FINNIFTY option chain traders using Python, pandas data manipulation and styling, and flask integration with HTML/CSS/JS
 
+The app reads live index and option-chain data from NSE. The table supports
+drag-to-resize columns and marks ATM, support, resistance, and max-pain
+strikes under the strike value. The selected table refreshes automatically
+every 15 seconds while the page is open.
+
 
 
 
@@ -19,10 +24,17 @@ Live Option Chain Analyzer data fetcher, data pipeline, and online portal to der
 
 # Installation
 - Clone the repository:  `git clone https://github.com/kunal-jangid/LOCa`
-- Install libraries (if you haven't)
-    - `pip install flask`
-    - `pip install pandas`
-    - `pip install matplotlib`
+- Install the runtime dependencies: `pip install -r requirements.txt`
 - Enter directory: `cd LOCa`
 - Initiate the program: `py main.py`
-- Put this local host address on any browser(or just click the link): http://127.0.0.1:8080/
+- Open: `http://127.0.0.1:8090/`
+
+On Windows, double-click `launch_loca.bat`. It creates/uses the local Python
+environment and starts LOCa on port `8090`. Set `LOCA_PORT` to use another
+available local port.
+
+## Render deployment
+
+`render.yaml` and `Procfile` are included for a Render web service. Connect
+the GitHub repository in Render and deploy the `loca-option-chain` service;
+Render supplies the `PORT` environment variable automatically.

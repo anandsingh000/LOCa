@@ -1,161 +1,378 @@
-import json
-import time
-import os
-import numpy as np
-import pandas
+from datetime import datetime, timezone
+from threading import Lock
+from time import monotonic
+
+import pandas as pd
 import requests
-from bs4 import BeautifulSoup
+from requests import RequestException
 
 import datastyler as ds
 
+
+NSE_BASE_URL = "https://www.nseindia.com"
+NSE_TIMEOUT = 20
+CACHE_TTL_SECONDS = 5
+CONTRACT_CACHE_TTL_SECONDS = 60
 headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+    "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9",
 }
-url = "https://www.nseindia.com/api/option-chain-indices?symbol="
+
+_INDEX_ALIASES = {
+    "NIFTY": {"NIFTY", "NIFTY 50"},
+    "BANKNIFTY": {"BANKNIFTY", "NIFTY BANK"},
+    "FINNIFTY": {"FINNIFTY", "NIFTY FIN SERVICE",
+                 "NIFTY FINANCIAL SERVICES"},
+}
+_nse_session = requests.Session()
+_nse_session_primed = False
+_cache_lock = Lock()
+_network_lock = Lock()
+_payload_cache = {}
 
 
-def removeNeg(s):
-  if s < 0:
-    return 0
-  else:
-    return s
+class NSEDataError(RuntimeError):
+  """Raised when NSE cannot provide a usable live-data response."""
+
+
+def _cached_payload(key, loader, ttl=CACHE_TTL_SECONDS):
+  now = monotonic()
+  with _cache_lock:
+    cached = _payload_cache.get(key)
+    if cached and now - cached[0] < ttl:
+      return cached[1]
+
+  # Re-check after acquiring the network lock so simultaneous browser
+  # requests do not make duplicate NSE calls on a cold cache.
+  with _network_lock:
+    now = monotonic()
+    with _cache_lock:
+      cached = _payload_cache.get(key)
+      if cached and now - cached[0] < ttl:
+        return cached[1]
+    value = loader()
+    with _cache_lock:
+      _payload_cache[key] = (monotonic(), value)
+    return value
+
+
+def _request_headers(accept="application/json, text/plain, */*"):
+  return {
+      **headers,
+      "Accept": accept,
+      "Referer": f"{NSE_BASE_URL}/option-chain",
+  }
+
+
+def _prime_nse_session():
+  global _nse_session_primed
+  if _nse_session_primed:
+    return
+
+  try:
+    response = _nse_session.get(
+        f"{NSE_BASE_URL}/option-chain",
+        headers=_request_headers("text/html,application/xhtml+xml"),
+        timeout=NSE_TIMEOUT,
+    )
+    response.raise_for_status()
+  except RequestException as exc:
+    raise NSEDataError(
+        "NSE option-chain page could not be reached. "
+        "Please try again after a short while.") from exc
+  _nse_session_primed = True
+
+
+def _nse_json(path, params=None):
+  global _nse_session_primed
+  last_error = None
+
+  for attempt in range(2):
+    _prime_nse_session()
+    try:
+      response = _nse_session.get(
+          f"{NSE_BASE_URL}{path}",
+          params=params,
+          headers=_request_headers(),
+          timeout=NSE_TIMEOUT,
+      )
+      if response.status_code in (401, 403) and attempt == 0:
+        _nse_session_primed = False
+        _nse_session.cookies.clear()
+        continue
+      response.raise_for_status()
+      data = response.json()
+      if not data:
+        raise NSEDataError(f"NSE returned no data for {path}.")
+      return data
+    except NSEDataError:
+      raise
+    except RequestException as exc:
+      last_error = exc
+    except ValueError as exc:
+      last_error = exc
+
+  detail = str(last_error) if last_error else "unknown response error"
+  raise NSEDataError(
+      f"NSE live data request failed for {path}: {detail}") from last_error
+
+
+def _validate_index(index):
+  if index not in _INDEX_ALIASES:
+    raise NSEDataError(f"Unsupported index: {index}")
+
+
+def _index_value(index):
+  _validate_index(index)
+  payload = _cached_payload(
+      "all-indices",
+      lambda: _nse_json("/api/allIndices"),
+  )
+  aliases = _INDEX_ALIASES[index]
+
+  for item in payload.get("data", []):
+    if item.get("index") in aliases or item.get("indexSymbol") in aliases:
+      try:
+        return float(item["last"])
+      except (KeyError, TypeError, ValueError) as exc:
+        raise NSEDataError(f"NSE returned an invalid value for {index}.") from exc
+
+  raise NSEDataError(f"NSE did not return a value for {index}.")
 
 
 def nifty():
-  url = "https://www.nseindia.com/"
-  req = requests.get(url, headers=headers)
-
-  soup = BeautifulSoup(req.content, 'html.parser')
-
-  niftyVal = soup.find("span", {"class": "val"}).string
-  return niftyVal
+  return niftyval("NIFTY")
 
 
 def niftyval(index):
-  url = "https://www.nseindia.com/"
-  req = requests.get(url, headers=headers)
+  return f"{_index_value(index):,.2f}"
 
-  soup = BeautifulSoup(req.content, 'html.parser')
 
-  niftyVal = soup.find_all("p", {"class": "tb_val"})
-  if index == "NIFTY":
-    return niftyVal[0].text.split(' ')[0]
-  elif index == "BANKNIFTY":
-    return niftyVal[3].text.split(' ')[0]
-  elif index == "FINNIFTY":
-    return niftyVal[4].text.split(' ')[0]
-  else:
-    return "Error generated, try again or contact backend."
+def _option_chain_json(index):
+  _validate_index(index)
+  contract_info = _cached_payload(
+      f"contract-info:{index}",
+      lambda: _nse_json(
+          "/api/option-chain-contract-info",
+          params={"symbol": index},
+      ),
+      ttl=CONTRACT_CACHE_TTL_SECONDS,
+  )
+  expiry_dates = contract_info.get("expiryDates", [])
+  if not expiry_dates:
+    raise NSEDataError(f"NSE returned no expiry dates for {index}.")
+
+  payload = _cached_payload(
+      f"option-chain:{index}:{expiry_dates[0]}",
+      lambda: _nse_json(
+          "/api/option-chain-v3",
+          params={
+              "type": "Indices",
+              "symbol": index,
+              "expiry": expiry_dates[0],
+          },
+      ),
+  )
+  if not payload.get("records", {}).get("data"):
+    raise NSEDataError(f"NSE returned no option-chain rows for {index}.")
+  return payload
 
 
 def IV(index):
-  try:
-    json_obj = requests.get(url + index, headers=headers).json()
-    org_data = {}
-    for i in json_obj["records"]["expiryDates"]:
-      org_data[i] = {"PE": [], "CE": []}
-    for j in json_obj["records"]["data"]:
-      if "PE" in j:
-        org_data[j["expiryDate"]]["PE"].append(j["PE"])
-      if "CE" in j:
-        org_data[j["expiryDate"]]["CE"].append(j["CE"])
-
-    po = pandas.DataFrame.from_records(
-        org_data[json_obj["records"]["expiryDates"][0]]["PE"])
-    co = pandas.DataFrame.from_records(
-        org_data[json_obj["records"]["expiryDates"][0]]["CE"])
-    po = po["impliedVolatility"]
-    co = co["impliedVolatility"]
-    return po, co
-  except:
-    time.sleep(1)
-    IV(index)
+  json_obj = _option_chain_json(index)
+  put_values = []
+  call_values = []
+  for row in json_obj["records"]["data"]:
+    if row.get("PE"):
+      put_values.append(row["PE"].get("impliedVolatility", 0))
+    if row.get("CE"):
+      call_values.append(row["CE"].get("impliedVolatility", 0))
+  return pd.Series(put_values), pd.Series(call_values)
 
 
-a, b = IV("NIFTY")
-print(b)
+def removeNeg(value):
+  return max(value, 0)
+
+
+def _prepared_dataframe(json_obj, underlying):
+  result_df = raw_to_dataframe(json_obj)
+  premium = result_df["STRIKE"] - underlying
+  result_df.insert(4, "Prem_c", (premium * -1).tolist())
+  result_df.insert(10, "Prem_p", premium.tolist())
+  result_df["Prem_c"] = result_df["Prem_c"].apply(removeNeg)
+  result_df["Prem_p"] = result_df["Prem_p"].apply(removeNeg)
+  return result_df
+
+
+def _level_value(value):
+  value = float(value)
+  return int(value) if value.is_integer() else round(value, 2)
+
+
+def calculate_levels(df, underlying):
+  """Calculate the four strike markers shown below the STRIKE value."""
+  strikes = sorted(float(value) for value in df["STRIKE"].unique())
+  if not strikes:
+    raise NSEDataError("NSE returned no strike prices.")
+
+  atm = min(strikes, key=lambda strike: abs(strike - underlying))
+  below_atm = df[df["STRIKE"] <= atm]
+  above_atm = df[df["STRIKE"] >= atm]
+  support_rows = below_atm if not below_atm.empty else df
+  resistance_rows = above_atm if not above_atm.empty else df
+  support = float(support_rows.loc[
+      support_rows["openInterest_p"].idxmax(), "STRIKE"])
+  resistance = float(resistance_rows.loc[
+      resistance_rows["openInterest_c"].idxmax(), "STRIKE"])
+
+  call_oi = dict(zip(df["STRIKE"].astype(float), df["openInterest_c"]))
+  put_oi = dict(zip(df["STRIKE"].astype(float), df["openInterest_p"]))
+  max_pain = min(
+      strikes,
+      key=lambda candidate: sum(
+          call_oi[strike] * max(candidate - strike, 0) +
+          put_oi[strike] * max(strike - candidate, 0)
+          for strike in strikes
+      ),
+  )
+
+  levels = {
+      "atm": _level_value(atm),
+      "support": _level_value(support),
+      "resistance": _level_value(resistance),
+      "maxpain": _level_value(max_pain),
+  }
+  markers = {}
+  for label, value in levels.items():
+    markers.setdefault(str(value), []).append(label.upper())
+  levels["markers"] = markers
+  return levels
+
+
+def _pcr_from_dataframe(df, underlying):
+  target_strike = (int(underlying) // 100) * 100
+  target_row = (df["STRIKE"] - target_strike).abs().idxmin()
+  target_position = df.index.get_loc(target_row)
+
+  result = []
+  for column in ["VOLUME", "CHNG_OI", "openInterest"]:
+    put_start = max(0, target_position - 10)
+    put_sum = df[f"{column}_p"].iloc[put_start:target_position].sum()
+    call_sum = df[f"{column}_c"].iloc[target_position:target_position + 10].sum()
+    ratio = round(put_sum / call_sum, 4) if call_sum else 0
+    result.append([str(put_sum), str(call_sum), str(ratio), column])
+  return result
+
+
+def _underlying_value(json_obj, index):
+  underlying = json_obj["records"].get("underlyingValue")
+  return float(underlying) if underlying is not None else _index_value(index)
+
+
+def quotes():
+  """Return all three index values with one cached NSE request."""
+  values = {index: _index_value(index) for index in _INDEX_ALIASES}
+  return {
+      "values": {index: f"{value:,.2f}" for index, value in values.items()},
+      "updated_at": datetime.now(timezone.utc).isoformat(),
+  }
+
+
+def snapshot(index):
+  """Build table, PCR and strike markers from one option-chain payload."""
+  json_obj = _option_chain_json(index)
+  underlying = _underlying_value(json_obj, index)
+  result_df = _prepared_dataframe(json_obj, underlying)
+  levels = calculate_levels(result_df, underlying)
+  return {
+      "index": index,
+      "value": f"{underlying:,.2f}",
+      "table_html": ds.prettier(
+          result_df,
+          index,
+          nifty_value=underlying,
+          strike_markers=levels["markers"],
+      ),
+      "pcr": _pcr_from_dataframe(result_df, underlying),
+      "levels": levels,
+      "source_timestamp": json_obj["records"].get("timestamp"),
+      "updated_at": datetime.now(timezone.utc).isoformat(),
+  }
 
 
 def optionchain(index):
-  json_obj = requests.get(url + index, headers=headers).json()
-  nif = niftyval(index)
-  result_df = raw_to_dataframe(json_obj)
-  Prem = result_df['STRIKE'] - int(
-      float(''.join(map(str, (niftyval(index).split(','))))))
-  Prem_call = Prem * -1  # + result_df['LTP_call']
-  Prem_put = Prem  #- result_df['LTP_put']
-  result_df.insert(4, "Prem_c", Prem_call.tolist())
-  result_df.insert(10, "Prem_p", Prem_put.tolist())
-  result_df['Prem_c'] = result_df['Prem_c'].apply(removeNeg)
-  result_df['Prem_p'] = result_df['Prem_p'].apply(removeNeg)
-  return ds.prettier(result_df, index)
+  return snapshot(index)["table_html"]
+
+
+def _normalise_option(option, fallback_strike):
+  return {
+      "strikePrice": option.get("strikePrice", fallback_strike),
+      "pChange": option.get("pChange", option.get("PChange", 0)),
+      "lastPrice": option.get("lastPrice", 0),
+      "totalTradedVolume": option.get("totalTradedVolume", 0),
+      "changeinOpenInterest": option.get("changeinOpenInterest", 0),
+      "openInterest": option.get("openInterest", 0),
+  }
+
+
+def _option_rows(json_obj, side):
+  rows = []
+  for row in json_obj.get("records", {}).get("data", []):
+    option = row.get(side)
+    if option:
+      rows.append(_normalise_option(option, row.get("strikePrice", 0)))
+  return rows
 
 
 def raw_to_dataframe(json_obj):
-  try:
-    org_data = {}
-    for i in json_obj["records"]["expiryDates"]:
-      org_data[i] = {"PE": [], "CE": []}
-    for j in json_obj["records"]["data"]:
-      if "PE" in j:
-        org_data[j["expiryDate"]]["PE"].append(j["PE"])
-      if "CE" in j:
-        org_data[j["expiryDate"]]["CE"].append(j["CE"])
+  put_rows = _option_rows(json_obj, "PE")
+  call_rows = _option_rows(json_obj, "CE")
+  if not put_rows or not call_rows:
+    raise NSEDataError("NSE returned an incomplete option-chain response.")
 
-    po = pandas.DataFrame.from_records(
-        org_data[json_obj["records"]["expiryDates"][0]]["PE"])
-    co = pandas.DataFrame.from_records(
-        org_data[json_obj["records"]["expiryDates"][0]]["CE"])
-    po = po[[
-        "strikePrice", "pChange", "lastPrice", "totalTradedVolume",
-        "changeinOpenInterest", "openInterest"
-    ]]  #,"change","impliedVolatility"
-    po.columns = ["STRIKE", "%", "LTP", "VOLUME", "CHNG_OI",
-                  "openInterest"]  #,"CHNG", "IV"
-    co = co[[
-        "openInterest", "changeinOpenInterest", "totalTradedVolume",
-        "lastPrice", "pChange", "strikePrice"
-    ]]  #,"impliedVolatility"
-    co.columns = ["openInterest", "CHNG_OI", "VOLUME", "LTP", "%",
-                  "STRIKE"]  #,"IV"
+  po = pd.DataFrame.from_records(put_rows)[[
+      "strikePrice", "pChange", "lastPrice", "totalTradedVolume",
+      "changeinOpenInterest", "openInterest"
+  ]]
+  po.columns = ["STRIKE", "%", "LTP", "VOLUME", "CHNG_OI",
+                "openInterest"]
+  co = pd.DataFrame.from_records(call_rows)[[
+      "openInterest", "changeinOpenInterest", "totalTradedVolume",
+      "lastPrice", "pChange", "strikePrice"
+  ]]
+  co.columns = ["openInterest", "CHNG_OI", "VOLUME", "LTP", "%",
+                "STRIKE"]
 
-    result_df = pandas.merge(co,
-                             po,
-                             how='right',
-                             on="STRIKE",
-                             indicator=False,
-                             suffixes=("_c", "_p"))
-    resistance1 = result_df['STRIKE'] - result_df['LTP_p']
-    resistance2 = result_df['LTP_c'] + result_df['STRIKE']
-    result_df.insert(6, "Br-Ev_p", resistance1.tolist())
-    result_df.insert(5, "Br-Ev_c", resistance2.tolist())
+  result_df = pd.merge(
+      co,
+      po,
+      how="outer",
+      on="STRIKE",
+      suffixes=("_c", "_p"),
+  ).sort_values("STRIKE").reset_index(drop=True)
 
-    result_df[['LTP_c', 'LTP_p']] = result_df[['LTP_c', 'LTP_p']].round(1)
-    result_df[['%_c', 'Br-Ev_c', '%_p',
-               'Br-Ev_p']] = result_df[['%_c', 'Br-Ev_c', '%_p',
-                                        'Br-Ev_p']].round(decimals=0)
-    result_df['Br-Ev_p'] = result_df['Br-Ev_p'].astype(int)
-    result_df['Br-Ev_c'] = result_df['Br-Ev_c'].astype(int)
-    result_df = result_df.fillna(0)
+  numeric_columns = [
+      "openInterest_c", "CHNG_OI_c", "VOLUME_c", "LTP_c", "%_c",
+      "STRIKE", "%_p", "LTP_p", "VOLUME_p", "CHNG_OI_p",
+      "openInterest_p",
+  ]
+  for column in numeric_columns:
+    result_df[column] = pd.to_numeric(result_df[column], errors="coerce").fillna(0)
 
-    return result_df
-
-  except Exception as e:
-    print(e)
+  result_df.insert(5, "Br-Ev_c",
+                   (result_df["LTP_c"] + result_df["STRIKE"]).tolist())
+  result_df.insert(6, "Br-Ev_p",
+                   (result_df["STRIKE"] - result_df["LTP_p"]).tolist())
+  result_df[["LTP_c", "LTP_p"]] = result_df[["LTP_c", "LTP_p"]].round(1)
+  result_df[["%_c", "Br-Ev_c", "%_p", "Br-Ev_p"]] = result_df[[
+      "%_c", "Br-Ev_c", "%_p", "Br-Ev_p"
+  ]].round(0)
+  result_df["Br-Ev_p"] = result_df["Br-Ev_p"].astype(int)
+  result_df["Br-Ev_c"] = result_df["Br-Ev_c"].astype(int)
+  return result_df.fillna(0)
 
 
 def pcr(index):
-  json_obj = requests.get(url + index, headers=headers).json()
-  df = raw_to_dataframe(json_obj)
-  nif = int(float(''.join(map(str, (niftyval(index).split(','))))))
-  c = df[df['STRIKE'] == (nif // 100 * 100)].index.values
-
-  result = []
-
-  for col in ['VOLUME', 'CHNG_OI', 'openInterest']:
-    put_sum = df[col + '_p'].iloc[c[0] - 10:c[0]].sum()
-    call_sum = df[col + '_c'].iloc[c[0]:c[0] + 10].sum()
-    result.append(
-        list((str(put_sum), str(call_sum), str(round(put_sum / call_sum,
-                                                     4)), col)))
-  return result
+  return snapshot(index)["pcr"]

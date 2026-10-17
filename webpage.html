@@ -2,56 +2,191 @@
 <html>
 
 <head>
-    <meta name="viewport" content="width=device-width; initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <style>
         h1 {
             color: whitesmoke;
             text-align: center;
+            margin: 16px 0;
         }
 
         body {
             margin: 0;
-            width: 100vw;
-            height: 100vh;
+            min-width: 320px;
+            width: 100%;
+            min-height: 100vh;
+            overflow-x: hidden;
         }
 
-        #indexbutton {
+        .index-button {
             height: 60px;
             width: 140px;
             background: rgb(111, 224, 220);
             border-width: 7px;
             border-color: mediumseagreen;
             border-radius: 15px;
+            cursor: pointer;
         }
 
-        #indexbutton:active {
+        .index-button:active {
             animation-duration: 2s;
             background: rgb(51, 183, 176);
             color: whitesmoke;
         }
-       #put_call_ratio {
+
+        #put_call_ratio {
             list-style-type: none;
             align-self: left;
             color: whitesmoke; 
             position: relative;
-       }
-       ul {
+            padding: 0;
+            margin: 12px auto;
+            max-width: 1100px;
+        }
+
+        #put_call_ratio {
             width: 100%;
             display: table;
             table-layout: fixed;
         }
-       ul li {
+
+        #put_call_ratio li {
             display: table-cell;
             width: auto;
             text-align: center;
+            padding: 4px 8px;
         }
 
         #optionChainTable {
-            height: 800px;
-            width: fit-content;
+            box-sizing: border-box;
+            height: min(800px, calc(100vh - 260px));
+            min-height: 280px;
+            width: calc(100% - 20px);
+            max-width: 100vw;
+            margin: 0 10px;
             overflow: auto;
             background: #f9f9ff;
+            border: 1px solid rgba(0, 0, 0, 0.25);
+            border-radius: 6px;
         }
+
+        /* The generated pandas table can be wider than the screen. The
+           wrapper scrolls horizontally while the user resizes columns. */
+        #optionChainTable table {
+            table-layout: fixed;
+            width: max-content;
+            min-width: 100%;
+            border-collapse: collapse;
+        }
+
+        #optionChainTable table th,
+        #optionChainTable table td {
+            box-sizing: border-box;
+        }
+
+        #optionChainTable table th {
+            position: relative;
+            overflow: visible;
+            white-space: nowrap;
+        }
+
+        #optionChainTable table td {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .column-resize-handle {
+            position: absolute;
+            z-index: 5;
+            top: 0;
+            right: -4px;
+            width: 8px;
+            height: 100%;
+            padding: 0;
+            border: 0;
+            background: transparent;
+            cursor: col-resize;
+            touch-action: none;
+        }
+
+        .column-resize-handle:hover,
+        .column-resize-handle:focus-visible {
+            background: rgba(0, 105, 92, 0.55);
+            outline: none;
+        }
+
+        body.is-resizing,
+        body.is-resizing * {
+            cursor: col-resize !important;
+            user-select: none !important;
+        }
+
+        #table-tools {
+            display: none;
+            box-sizing: border-box;
+            width: calc(100% - 20px);
+            margin: 8px 10px 0;
+            color: whitesmoke;
+            font-size: 0.92rem;
+            text-align: right;
+        }
+
+        #table-tools button {
+            margin-left: 10px;
+            padding: 5px 10px;
+            border: 1px solid mediumseagreen;
+            border-radius: 5px;
+            background: rgb(111, 224, 220);
+            cursor: pointer;
+        }
+
+        #live-status {
+            box-sizing: border-box;
+            width: calc(100% - 20px);
+            margin: 8px 10px;
+            min-height: 24px;
+            color: whitesmoke;
+            text-align: right;
+            font-size: 0.9rem;
+        }
+
+        #refreshData {
+            margin-left: 10px;
+            padding: 5px 10px;
+            border: 1px solid mediumseagreen;
+            border-radius: 5px;
+            background: rgb(111, 224, 220);
+            cursor: pointer;
+        }
+
+        .strike-level-value {
+            font-weight: 700;
+            line-height: 1.1;
+        }
+
+        .strike-level-badges {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 2px;
+            margin-top: 4px;
+        }
+
+        .strike-level-badge {
+            display: inline-block;
+            padding: 2px 4px;
+            border-radius: 3px;
+            color: #111;
+            font-size: 0.66rem;
+            font-weight: 700;
+            line-height: 1.1;
+        }
+
+        .strike-level-atm { background: #ffe066; }
+        .strike-level-support { background: #8ce99a; }
+        .strike-level-resistance { background: #ffa8a8; }
+        .strike-level-maxpain { background: #d0bfff; }
     </style>
 </head>
 
@@ -60,55 +195,336 @@
 
     <script>
 
-        function putCallRatio(endpoint) {
-          fetch("/pcr/" + endpoint)
-                .then((response) => response.text())
-                .then((data) => {
-                    document.getElementById("put_call_ratio").innerHTML = data;
-                });
-        }
-        function fetchNifty() {
-            fetch("NIFTY")
-                .then((response) => response.text())
-                .then((data) => {
-                    document.getElementById("nifty_value").innerHTML = data;
-                });
+        const MIN_COLUMN_WIDTH = 64;
+        const MAX_INITIAL_COLUMN_WIDTH = 320;
+        const COLUMN_WIDTHS_PREFIX = "loca-column-widths-v1:";
+        const AUTO_REFRESH_MS = 15000;
+        let activeTable = null;
+        let activeTableIndex = null;
+        let activeIndex = null;
+        let snapshotRequestNumber = 0;
+        let autoRefreshTimer = null;
 
-            fetch("BANKNIFTY")
-                .then((response) => response.text())
-                .then((data) => {
-                    document.getElementById("banknifty_value").innerHTML = data;
-                });
-
-            fetch("FINNIFTY")
-                .then((response) => response.text())
-                .then((data) => {
-                    document.getElementById("finnifty_value").innerHTML = data;
-                });
+        function renderPcr(items) {
+            const html = (items || []).map((item) =>
+                "<li><b>" + item[3] + "</b><br><b>Call: </b>" + item[1] +
+                "<br><b>Put: </b>" + item[0] + "<br><b>Ratio: </b>" +
+                item[2] + "</li>"
+            ).join("");
+            document.getElementById("put_call_ratio").innerHTML = html ||
+                "<li>Live PCR data is temporarily unavailable.</li>";
         }
 
-        function fetchTable(endpoint) {
-            fetch("/index/" + endpoint)
-                .then((response) => response.text())
-                .then((data) => {
-                    document.getElementById("optionChainTable").innerHTML = data;
+        function fetchQuotes() {
+            return fetch("/quotes", { cache: "no-store" })
+                .then((response) => {
+                    if (!response.ok) {
+                        throw new Error("Unable to load index values");
+                    }
+                    return response.json();
+                })
+                .then((payload) => {
+                    const values = payload.values || {};
+                    ["NIFTY", "BANKNIFTY", "FINNIFTY"].forEach((index) => {
+                        const target = document.getElementById(
+                            index === "NIFTY" ? "nifty_value" :
+                            index === "BANKNIFTY" ? "banknifty_value" :
+                            "finnifty_value"
+                        );
+                        target.textContent = values[index] || "Unavailable";
+                    });
+                    return payload;
+                })
+                .catch(() => {
+                    document.getElementById("live-status").textContent =
+                        "Live NSE quote update is temporarily unavailable.";
                 });
-          fetchNifty('niftynow');
-          putCallRatio(endpoint);
         }
 
-        fetchNifty();
+        function widthStorageKey(index) {
+            return COLUMN_WIDTHS_PREFIX + index;
+        }
+
+        function getColumnLabel(header, columnIndex) {
+            const label = header.textContent.replace(/\s+/g, " ").trim();
+            return label || "column-" + columnIndex;
+        }
+
+        function loadSavedWidths(index) {
+            try {
+                return JSON.parse(localStorage.getItem(widthStorageKey(index))) || {};
+            } catch (error) {
+                return {};
+            }
+        }
+
+        function saveWidths(index, table) {
+            if (!index || !table) {
+                return;
+            }
+
+            const headers = Array.from(table.querySelectorAll("thead th"));
+            const widths = {};
+            headers.forEach((header, columnIndex) => {
+                const column = table.querySelector(
+                    "col[data-column-index='" + columnIndex + "']"
+                );
+                if (column) {
+                    widths[columnIndex + ":" + getColumnLabel(header, columnIndex)] =
+                        Math.round(parseFloat(column.style.width));
+                }
+            });
+
+            try {
+                localStorage.setItem(widthStorageKey(index), JSON.stringify(widths));
+            } catch (error) {
+                // Private browsing or disabled storage should not block resizing.
+            }
+        }
+
+        function setColumnWidth(table, columnIndex, width) {
+            const column = table.querySelector(
+                "col[data-column-index='" + columnIndex + "']"
+            );
+            if (!column) {
+                return;
+            }
+
+            const safeWidth = Math.max(MIN_COLUMN_WIDTH, Math.round(width));
+            column.style.width = safeWidth + "px";
+
+            const columns = Array.from(table.querySelectorAll("col"));
+            const totalWidth = columns.reduce((total, currentColumn) => {
+                return total + (parseFloat(currentColumn.style.width) || 0);
+            }, 0);
+            table.style.width = Math.max(totalWidth, table.parentElement.clientWidth) + "px";
+        }
+
+        function resizeColumn(event, table, columnIndex, handle) {
+            if (event.button !== undefined && event.button !== 0) {
+                return;
+            }
+
+            event.preventDefault();
+            const column = table.querySelector(
+                "col[data-column-index='" + columnIndex + "']"
+            );
+            if (!column) {
+                return;
+            }
+
+            const startingWidth = parseFloat(column.style.width) ||
+                table.querySelectorAll("thead th")[columnIndex].getBoundingClientRect().width;
+            const startingX = event.clientX;
+            document.body.classList.add("is-resizing");
+            handle.setPointerCapture?.(event.pointerId);
+
+            function move(pointerEvent) {
+                setColumnWidth(
+                    table,
+                    columnIndex,
+                    startingWidth + pointerEvent.clientX - startingX
+                );
+                handle.setAttribute("aria-valuenow", Math.round(
+                    parseFloat(column.style.width)
+                ));
+            }
+
+            function stop() {
+                document.body.classList.remove("is-resizing");
+                window.removeEventListener("pointermove", move);
+                window.removeEventListener("pointerup", stop);
+                window.removeEventListener("pointercancel", stop);
+                saveWidths(activeTableIndex, table);
+            }
+
+            window.addEventListener("pointermove", move);
+            window.addEventListener("pointerup", stop);
+            window.addEventListener("pointercancel", stop);
+        }
+
+        function setupResizableColumns(index) {
+            const container = document.getElementById("optionChainTable");
+            const table = container.querySelector("table");
+            if (!table) {
+                return;
+            }
+
+            const headers = Array.from(table.querySelectorAll("thead th"));
+            if (!headers.length) {
+                return;
+            }
+
+            let colgroup = table.querySelector("colgroup");
+            if (!colgroup) {
+                colgroup = document.createElement("colgroup");
+                table.insertBefore(colgroup, table.firstChild);
+            }
+            colgroup.innerHTML = "";
+
+            const savedWidths = loadSavedWidths(index);
+            const widths = headers.map((header, columnIndex) => {
+                const label = getColumnLabel(header, columnIndex);
+                const savedWidth = Number(savedWidths[
+                    columnIndex + ":" + label
+                ]);
+                const naturalWidth = Math.min(
+                    MAX_INITIAL_COLUMN_WIDTH,
+                    Math.max(MIN_COLUMN_WIDTH, header.scrollWidth + 18)
+                );
+                return Number.isFinite(savedWidth) && savedWidth >= MIN_COLUMN_WIDTH
+                    ? savedWidth
+                    : naturalWidth;
+            });
+
+            headers.forEach((header, columnIndex) => {
+                const column = document.createElement("col");
+                column.dataset.columnIndex = columnIndex;
+                column.style.width = widths[columnIndex] + "px";
+                colgroup.appendChild(column);
+
+                const oldHandle = header.querySelector(".column-resize-handle");
+                oldHandle?.remove();
+
+                const handle = document.createElement("button");
+                handle.type = "button";
+                handle.className = "column-resize-handle";
+                handle.title = "Drag to resize this column";
+                handle.setAttribute("aria-label", "Resize " +
+                    getColumnLabel(header, columnIndex) + " column");
+                handle.setAttribute("aria-valuemin", MIN_COLUMN_WIDTH);
+                handle.setAttribute("aria-valuenow", widths[columnIndex]);
+                handle.setAttribute("aria-orientation", "vertical");
+                handle.addEventListener("pointerdown", (event) => {
+                    resizeColumn(event, table, columnIndex, handle);
+                });
+                handle.addEventListener("keydown", (event) => {
+                    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+                        return;
+                    }
+                    event.preventDefault();
+                    const direction = event.key === "ArrowRight" ? 12 : -12;
+                    setColumnWidth(
+                        table,
+                        columnIndex,
+                        parseFloat(column.style.width) + direction
+                    );
+                    handle.setAttribute("aria-valuenow", Math.round(
+                        parseFloat(column.style.width)
+                    ));
+                    saveWidths(index, table);
+                });
+                header.appendChild(handle);
+            });
+
+            table.style.tableLayout = "fixed";
+            const totalWidth = widths.reduce((total, width) => total + width, 0);
+            table.style.width = Math.max(totalWidth, container.clientWidth) + "px";
+            activeTable = table;
+            activeTableIndex = index;
+            document.getElementById("table-tools").style.display = "block";
+        }
+
+        function resetColumnWidths() {
+            if (!activeTable || !activeTableIndex) {
+                return;
+            }
+            try {
+                localStorage.removeItem(widthStorageKey(activeTableIndex));
+            } catch (error) {
+                // Ignore disabled local storage.
+            }
+            setupResizableColumns(activeTableIndex);
+        }
+
+        function setLiveStatus(message) {
+            document.getElementById("live-status").innerHTML = message;
+        }
+
+        function formatUpdatedAt(snapshot) {
+            const source = snapshot.source_timestamp || snapshot.updated_at;
+            if (!source) {
+                return "Updated just now";
+            }
+            return "NSE data: " + source;
+        }
+
+        function fetchTable(endpoint, options = {}) {
+            activeIndex = endpoint;
+            const requestNumber = ++snapshotRequestNumber;
+            const silent = options.silent === true;
+            if (!silent) {
+                setLiveStatus("Loading " + endpoint + " data...");
+            } else {
+                setLiveStatus("Refreshing " + endpoint + " data...");
+            }
+
+            fetch("/snapshot/" + endpoint, { cache: "no-store" })
+                .then((response) => {
+                    if (!response.ok) {
+                        throw new Error("Unable to load option chain");
+                    }
+                    return response.json();
+                })
+                .then((snapshot) => {
+                    if (requestNumber !== snapshotRequestNumber) {
+                        return;
+                    }
+                    document.getElementById("optionChainTable").innerHTML =
+                        snapshot.table_html;
+                    setupResizableColumns(endpoint);
+                    renderPcr(snapshot.pcr);
+                    setLiveStatus(
+                        formatUpdatedAt(snapshot) +
+                        " · auto-refresh every 15 seconds" +
+                        " <button id='refreshData' type='button'>Refresh now</button>"
+                    );
+                    document.getElementById("refreshData").addEventListener(
+                        "click", () => fetchTable(activeIndex)
+                    );
+                })
+                .catch(() => {
+                    if (requestNumber !== snapshotRequestNumber) {
+                        return;
+                    }
+                    setLiveStatus(
+                        "Live option-chain data is temporarily unavailable. " +
+                        "Please try Refresh now."
+                    );
+                });
+            if (options.skipQuotes !== true) {
+                fetchQuotes();
+            }
+        }
+
+        function startAutoRefresh() {
+            window.clearInterval(autoRefreshTimer);
+            autoRefreshTimer = window.setInterval(() => {
+                fetchQuotes();
+                if (activeIndex) {
+                    fetchTable(activeIndex, { silent: true, skipQuotes: true });
+                }
+            }, AUTO_REFRESH_MS);
+        }
+
+        document.addEventListener("DOMContentLoaded", () => {
+            document.getElementById("resetColumnWidths").addEventListener(
+                "click", resetColumnWidths
+            );
+            fetchQuotes();
+            startAutoRefresh();
+        });
     </script>
 
         <center>
-            <button onclick="fetchTable('NIFTY');" id="indexbutton">
+            <button onclick="fetchTable('NIFTY');" class="index-button">
                 <b>NIFTY</b> <br> <div id="nifty_value"></div>
             </button>
-            <button onclick="fetchTable('BANKNIFTY')" id="indexbutton">
-                <b>BANKNIFTY</b> <br> <div id="banknifty_value">
+            <button onclick="fetchTable('BANKNIFTY')" class="index-button">
+                <b>BANKNIFTY</b> <br> <div id="banknifty_value"></div>
             </button>
-            <button onclick="fetchTable('FINNIFTY')" id="indexbutton">
-                <b>FINNIFTY</b> <br> <div id="finnifty_value">
+            <button onclick="fetchTable('FINNIFTY')" class="index-button">
+                <b>FINNIFTY</b> <br> <div id="finnifty_value"></div>
             </button>
           <br>
           <br>
@@ -119,6 +535,13 @@
   <br>
   <br>
     <div id="optionChainTable" style="display:block"></div>
+    <div id="live-status" role="status" aria-live="polite">
+        Select an index to load live option-chain data.
+    </div>
+    <div id="table-tools">
+        Drag the border on any column heading to resize it.
+        <button id="resetColumnWidths" type="button">Reset column widths</button>
+    </div>
     <br>
     <br>
 </body>

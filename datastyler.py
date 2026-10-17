@@ -43,9 +43,30 @@ def highlight_min_strike(val, nearestLow, nearestHigh, brev_put_min,
     return f"background: white"
 
 
-def prettier(df, index="NIFTY"):
-  nifty = oc.niftyval(index)
-  nifty = float("".join(map(str, nifty.split(','))))
+def _format_strike(value, strike_markers):
+  numeric_value = float(value)
+  value_text = str(int(numeric_value)) if numeric_value.is_integer() else str(
+      numeric_value)
+  labels = strike_markers.get(str(int(numeric_value)), [])
+  if not labels:
+    return value_text
+
+  badges = "".join(
+      f"<span class='strike-level-badge strike-level-{label.lower()}'>"
+      f"{label}</span>" for label in labels)
+  return (
+      f"<div class='strike-level-value'>{value_text}</div>"
+      f"<div class='strike-level-badges'>{badges}</div>"
+  )
+
+
+def prettier(df, index="NIFTY", nifty_value=None, strike_markers=None):
+  strike_markers = strike_markers or {}
+  if nifty_value is None:
+    nifty = oc.niftyval(index)
+    nifty = float("".join(map(str, nifty.split(','))))
+  else:
+    nifty = float(nifty_value)
   if index in ['NIFTY', 'FINNIFTY']:
     nearestLow = (nifty // 50) * 50
     nearestHigh = nearestLow + 50
@@ -71,8 +92,13 @@ def prettier(df, index="NIFTY"):
   )
 
   # styler = styler.set_properties(subset=[['OI_call','CHNG_OI_call','CHNG_OI_put','OI_put']], **{'width': '10px'})
-  styler = styler.format(precision=1,
-                         decimal='.').set_properties(**{
+  styler = styler.format(
+      precision=1,
+      decimal='.',
+      formatter={
+          'STRIKE': lambda value: _format_strike(value, strike_markers),
+      },
+  ).set_properties(**{
                              'text-align': 'center',
                              'padding': '7px'
                          })  #.applymap(highlight_strike, subset=["STRIKE"])
