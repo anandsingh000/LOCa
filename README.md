@@ -109,9 +109,11 @@ server-side Analytics Token mode above for a shared dashboard that must remain
 connected across restarts. A standard OAuth access token has a shorter validity
 and is not a substitute for the one-year Analytics Token.
 
-The option-chain expiry defaults to Upstox's `current_week` relative expiry.
-Set `UPSTOX_EXPIRY` to another supported relative value or an explicit
-`YYYY-MM-DD` date when needed.
+The option-chain expiry defaults to `nearest`: LOCa reads Upstox's currently
+available option contracts and selects the earliest actual expiry for each
+index. This rolls over automatically and supports monthly-only contracts.
+Set `UPSTOX_EXPIRY` to a supported relative value or an explicit `YYYY-MM-DD`
+date to override this selection.
 
 ## Checks
 

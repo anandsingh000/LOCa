@@ -1,5 +1,5 @@
 from contextvars import ContextVar
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import os
 from threading import Lock
 from time import monotonic
@@ -222,14 +222,41 @@ def _upstox_option_record(option, strike):
   }
 
 
+def _upstox_expiry(index, client):
+  configured_expiry = os.environ.get("UPSTOX_EXPIRY", "nearest").strip()
+  if configured_expiry and configured_expiry.lower() not in ("nearest", "auto"):
+    return configured_expiry
+
+  payload = _cached_payload(
+      f"upstox-contracts:{client.cache_key}:{index}",
+      lambda: client.option_contracts(_UPSTOX_INDEX_KEYS[index]),
+      ttl=CONTRACT_CACHE_TTL_SECONDS,
+  )
+  contracts = payload.get("data", [])
+  if not isinstance(contracts, list):
+    raise UpstoxDataError(f"Upstox returned invalid option contracts for {index}.")
+  expiries = set()
+  # Upstox's contracts endpoint lists the currently available contracts.
+  # Select its first actual expiry instead of guessing a weekly date, which
+  # fails after weekly expiry or for indexes with monthly-only contracts.
+  for contract in contracts:
+    if not isinstance(contract, dict):
+      continue
+    try:
+      expiries.add(date.fromisoformat(contract["expiry"]))
+    except (KeyError, TypeError, ValueError):
+      continue
+  if not expiries:
+    raise UpstoxDataError(f"Upstox returned no available option expiries for {index}.")
+  return min(expiries).isoformat()
+
+
 def _upstox_option_chain_json(index):
   client = _current_upstox()
+  expiry_date = _upstox_expiry(index, client)
   payload = _cached_payload(
-      f"upstox-option-chain:{client.cache_key}:{index}",
-      lambda: client.option_chain(
-          _UPSTOX_INDEX_KEYS[index],
-          os.environ.get("UPSTOX_EXPIRY", "current_week"),
-      ),
+      f"upstox-option-chain:{client.cache_key}:{index}:{expiry_date}",
+      lambda: client.option_chain(_UPSTOX_INDEX_KEYS[index], expiry_date),
   )
   rows = []
   underlying = None

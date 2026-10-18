@@ -140,7 +140,13 @@ class UpstoxClient:
         {"instrument_key": instrument_keys},
     )
 
-  def option_chain(self, instrument_key, expiry="current_week"):
+  def option_contracts(self, instrument_key):
+    return self._get(
+        "/v2/option/contract",
+        {"instrument_key": instrument_key},
+    )
+
+  def option_chain(self, instrument_key, expiry):
     return self._get(
         "/v2/option/chain",
         {

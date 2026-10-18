@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import patch
 
@@ -44,6 +45,13 @@ class UpstoxDashboardTests(unittest.TestCase):
         dp, "_nse_json", side_effect=dp.NSEDataError("NSE unavailable in this test"))
     self.nse_stub.start()
     self.addCleanup(self.nse_stub.stop)
+    self.contracts_stub = patch.object(UpstoxClient, "option_contracts",
+                                      return_value={"status": "success", "data": [
+                                          {"expiry": "2026-10-29"},
+                                          {"expiry": "2026-10-22"},
+                                      ]})
+    self.get_contracts = self.contracts_stub.start()
+    self.addCleanup(self.contracts_stub.stop)
     self.original_config = (
         upstox.client_id,
         upstox.client_secret,
@@ -73,6 +81,42 @@ class UpstoxDashboardTests(unittest.TestCase):
     response = self.client.get("/snapshot/SENSEX")
     self.assertEqual(response.status_code, 503)
     self.assertIn("Upstox", response.get_json()["error"])
+
+  def test_sensex_uses_nearest_available_expiry(self):
+    upstox.access_token = "analytics-test-token"
+
+    def chain(instrument_key, expiry):
+      return {"status": "success", "data": (
+          OPTION_CHAIN_ROWS if expiry == "2026-10-22" else [])}
+
+    with patch.dict(os.environ):
+      os.environ.pop("UPSTOX_EXPIRY", None)
+      with patch.object(UpstoxClient, "option_chain", side_effect=chain) as get_chain:
+        response = self.client.get("/snapshot/SENSEX")
+
+    self.assertEqual(response.status_code, 200, response.get_json())
+    self.assertEqual(response.get_json()["source"], "Upstox live")
+    self.assertEqual(response.get_json()["expiry"], "2026-10-22")
+    get_chain.assert_called_once_with("BSE_INDEX|SENSEX", "2026-10-22")
+
+  @patch.object(UpstoxClient, "option_chain", return_value={
+      "status": "success", "data": OPTION_CHAIN_ROWS,
+  })
+  def test_explicit_expiry_overrides_discovery(self, get_chain):
+    upstox.access_token = "analytics-test-token"
+    with patch.dict(os.environ, {"UPSTOX_EXPIRY": "2026-10-22"}):
+      response = self.client.get("/snapshot/SENSEX")
+    self.assertEqual(response.status_code, 200)
+    self.get_contracts.assert_not_called()
+    get_chain.assert_called_once_with("BSE_INDEX|SENSEX", "2026-10-22")
+
+  def test_missing_contracts_returns_clear_provider_error(self):
+    upstox.access_token = "analytics-test-token"
+    self.get_contracts.return_value = {"status": "success", "data": []}
+    with patch.dict(os.environ, {"UPSTOX_EXPIRY": "nearest"}):
+      response = self.client.get("/snapshot/SENSEX")
+    self.assertEqual(response.status_code, 503)
+    self.assertIn("no available option expiries", response.get_json()["error"])
 
   @patch.object(UpstoxClient, "exchange_code",
                 return_value={"access_token": "session-token"})
