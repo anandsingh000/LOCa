@@ -242,7 +242,7 @@
         const MIN_COLUMN_WIDTH = 64;
         const MAX_INITIAL_COLUMN_WIDTH = 320;
         const COLUMN_WIDTHS_PREFIX = "loca-column-widths-v1:";
-        const AUTO_REFRESH_MS = 15000;
+        const AUTO_REFRESH_MS = 5000;
         let activeTable = null;
         let activeTableIndex = null;
         let activeIndex = null;
@@ -666,7 +666,8 @@
                     setLiveStatus(
                         formatUpdatedAt(snapshot) +
                         (snapshot.expiry ? " · expiry " + snapshot.expiry : "") +
-                        " · auto-refresh every 15 seconds", true
+                        " · auto-refresh every " + (AUTO_REFRESH_MS / 1000) +
+                        " seconds", true
                     );
                 })
                 .catch((error) => {

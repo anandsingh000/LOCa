@@ -6,7 +6,7 @@ The app reads index and option-chain data from Upstox when configured, with
 an NSE fallback for NSE indexes. The table supports
 drag-to-resize columns and marks ATM, support, resistance, and max-pain
 strikes under the strike value. The selected table refreshes automatically
-every 15 seconds while the page is open. Call and put volumes are displayed
+every 5 seconds while the page is open. Call and put volumes are displayed
 as rounded Indian lakhs (for example, `10,877,460` appears as `109 lakh`),
 while calculations continue to use the original raw values.
 
