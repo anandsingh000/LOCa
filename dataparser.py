@@ -1,4 +1,6 @@
+from contextvars import ContextVar
 from datetime import datetime, timezone
+import os
 from threading import Lock
 from time import monotonic
 
@@ -7,6 +9,7 @@ import requests
 from requests import RequestException
 
 import datastyler as ds
+from upstox_client import UpstoxClient, UpstoxError, upstox
 
 
 NSE_BASE_URL = "https://www.nseindia.com"
@@ -25,16 +28,33 @@ _INDEX_ALIASES = {
     "BANKNIFTY": {"BANKNIFTY", "NIFTY BANK"},
     "FINNIFTY": {"FINNIFTY", "NIFTY FIN SERVICE",
                  "NIFTY FINANCIAL SERVICES"},
+    "SENSEX": {"SENSEX"},
 }
+_UPSTOX_INDEX_KEYS = {
+    "NIFTY": "NSE_INDEX|Nifty 50",
+    "BANKNIFTY": "NSE_INDEX|Nifty Bank",
+    "FINNIFTY": "NSE_INDEX|Nifty Fin Service",
+    "SENSEX": "BSE_INDEX|SENSEX",
+}
+_NSE_INDEXES = {"NIFTY", "BANKNIFTY", "FINNIFTY"}
 _nse_session = requests.Session()
 _nse_session_primed = False
 _cache_lock = Lock()
 _network_lock = Lock()
 _payload_cache = {}
+_upstox_context = ContextVar("loca_upstox_context", default=None)
 
 
-class NSEDataError(RuntimeError):
+class DataProviderError(RuntimeError):
+  """Raised when a live market-data provider cannot answer."""
+
+
+class NSEDataError(DataProviderError):
   """Raised when NSE cannot provide a usable live-data response."""
+
+
+class UpstoxDataError(DataProviderError):
+  """Raised when Upstox cannot provide a usable live-data response."""
 
 
 def _cached_payload(key, loader, ttl=CACHE_TTL_SECONDS):
@@ -124,6 +144,150 @@ def _validate_index(index):
     raise NSEDataError(f"Unsupported index: {index}")
 
 
+def upstox_status():
+  client = _current_upstox()
+  return {
+      "connected": client.connected,
+      "oauth_configured": client.oauth_configured,
+      "connection_mode": (
+          "session" if _upstox_context.get() else
+          "server" if client.connected else "none"),
+      "provider": "Upstox live" if client.connected else "NSE fallback",
+  }
+
+
+def bind_upstox_token(access_token):
+  """Bind a request-local Upstox token without putting it in the session cookie."""
+  client = UpstoxClient(access_token=access_token) if access_token else None
+  return _upstox_context.set(client)
+
+
+def reset_upstox_context(token):
+  client = _upstox_context.get()
+  if client is not None:
+    client.session.close()
+  _upstox_context.reset(token)
+
+
+def _current_upstox():
+  return _upstox_context.get() or upstox
+
+
+def _upstox_enabled(index):
+  return index in _UPSTOX_INDEX_KEYS and _current_upstox().connected
+
+
+def _upstox_ltp_value(index):
+  client = _current_upstox()
+  payload = _cached_payload(
+      f"upstox-ltp:{client.cache_key}:{index}",
+      lambda: client.ltp(_UPSTOX_INDEX_KEYS[index]),
+  )
+  data = payload.get("data", {})
+  if not isinstance(data, dict) or not data:
+    raise UpstoxDataError(f"Upstox returned no quote for {index}.")
+  quote = next(iter(data.values()))
+  if not isinstance(quote, dict):
+    raise UpstoxDataError(f"Upstox returned an invalid quote for {index}.")
+  for key in ("last_price", "ltp"):
+    if quote.get(key) is not None:
+      try:
+        return float(quote[key])
+      except (TypeError, ValueError) as exc:
+        raise UpstoxDataError(
+            f"Upstox returned an invalid last price for {index}.") from exc
+  raise UpstoxDataError(f"Upstox returned no last price for {index}.")
+
+
+def _upstox_change_percent(market_data):
+  close = float(market_data.get("close_price") or 0)
+  last = float(market_data.get("ltp") or 0)
+  return ((last - close) / close * 100) if close else 0
+
+
+def _upstox_option_record(option, strike):
+  if not option:
+    return None
+  market_data = option.get("market_data", {})
+  return {
+      "strikePrice": strike,
+      "pChange": _upstox_change_percent(market_data),
+      "lastPrice": market_data.get("ltp", 0),
+      "totalTradedVolume": market_data.get("volume", 0),
+      "changeinOpenInterest": (
+          float(market_data.get("oi") or 0) -
+          float(market_data.get("prev_oi") or 0)),
+      "openInterest": market_data.get("oi", 0),
+      "impliedVolatility": (option.get("option_greeks") or {}).get("iv", 0),
+  }
+
+
+def _upstox_option_chain_json(index):
+  client = _current_upstox()
+  payload = _cached_payload(
+      f"upstox-option-chain:{client.cache_key}:{index}",
+      lambda: client.option_chain(
+          _UPSTOX_INDEX_KEYS[index],
+          os.environ.get("UPSTOX_EXPIRY", "current_week"),
+      ),
+  )
+  rows = []
+  underlying = None
+  expiry = None
+  data = payload.get("data", [])
+  if not isinstance(data, list):
+    raise UpstoxDataError(f"Upstox returned an invalid option chain for {index}.")
+  for item in data:
+    if not isinstance(item, dict):
+      raise UpstoxDataError(f"Upstox returned an invalid option row for {index}.")
+    strike = item.get("strike_price")
+    if strike is None:
+      continue
+    underlying = item.get("underlying_spot_price", underlying)
+    expiry = item.get("expiry", expiry)
+    try:
+      record = {
+          "strikePrice": strike,
+          "expiryDate": expiry,
+          "CE": _upstox_option_record(item.get("call_options"), strike),
+          "PE": _upstox_option_record(item.get("put_options"), strike),
+      }
+    except (AttributeError, TypeError, ValueError) as exc:
+      raise UpstoxDataError(
+          f"Upstox returned invalid option prices for {index}.") from exc
+    if record["CE"] or record["PE"]:
+      rows.append(record)
+  if not rows or underlying is None:
+    raise UpstoxDataError(f"Upstox returned no option-chain rows for {index}.")
+  try:
+    underlying = float(underlying)
+  except (TypeError, ValueError) as exc:
+    raise UpstoxDataError(f"Upstox returned an invalid spot price for {index}.") from exc
+  return {
+      "records": {
+          "data": rows,
+          "underlyingValue": underlying,
+          "timestamp": datetime.now(timezone.utc).isoformat(),
+          "expiryDate": expiry,
+      }
+  }
+
+
+def _provider_option_chain_json(index):
+  _validate_index(index)
+  if _upstox_enabled(index):
+    try:
+      return _upstox_option_chain_json(index), "Upstox live"
+    except (UpstoxError, UpstoxDataError) as exc:
+      if index not in _NSE_INDEXES:
+        raise UpstoxDataError(str(exc)) from exc
+  if index not in _NSE_INDEXES:
+    raise UpstoxDataError(
+        "Sensex live data requires an Upstox connection. "
+        "Configure UPSTOX_ACCESS_TOKEN or use the Upstox Connect button.")
+  return _nse_option_chain_json(index), "NSE fallback"
+
+
 def _index_value(index):
   _validate_index(index)
   payload = _cached_payload(
@@ -142,15 +306,31 @@ def _index_value(index):
   raise NSEDataError(f"NSE did not return a value for {index}.")
 
 
+def _provider_index_value(index):
+  _validate_index(index)
+  if _upstox_enabled(index):
+    try:
+      return _upstox_ltp_value(index), "Upstox live"
+    except (UpstoxError, UpstoxDataError) as exc:
+      if index not in _NSE_INDEXES:
+        raise UpstoxDataError(str(exc)) from exc
+  if index not in _NSE_INDEXES:
+    raise UpstoxDataError(
+        "Sensex live quote requires an Upstox connection. "
+        "Configure UPSTOX_ACCESS_TOKEN or use the Upstox Connect button.")
+  return _index_value(index), "NSE fallback"
+
+
 def nifty():
   return niftyval("NIFTY")
 
 
 def niftyval(index):
-  return f"{_index_value(index):,.2f}"
+  value, _ = _provider_index_value(index)
+  return f"{value:,.2f}"
 
 
-def _option_chain_json(index):
+def _nse_option_chain_json(index):
   _validate_index(index)
   contract_info = _cached_payload(
       f"contract-info:{index}",
@@ -181,7 +361,7 @@ def _option_chain_json(index):
 
 
 def IV(index):
-  json_obj = _option_chain_json(index)
+  json_obj, _ = _provider_option_chain_json(index)
   put_values = []
   call_values = []
   for row in json_obj["records"]["data"]:
@@ -268,21 +448,40 @@ def _pcr_from_dataframe(df, underlying):
 
 def _underlying_value(json_obj, index):
   underlying = json_obj["records"].get("underlyingValue")
-  return float(underlying) if underlying is not None else _index_value(index)
+  return (float(underlying) if underlying is not None else
+          _provider_index_value(index)[0])
 
 
 def quotes():
-  """Return all three index values with one cached NSE request."""
-  values = {index: _index_value(index) for index in _INDEX_ALIASES}
+  """Return all supported index values and the active provider per index."""
+  values = {}
+  sources = {}
+  errors = {}
+  for index in _INDEX_ALIASES:
+    try:
+      value, source = _provider_index_value(index)
+      values[index] = f"{value:,.2f}"
+      sources[index] = source
+    except UpstoxDataError as exc:
+      values[index] = None
+      sources[index] = ("Connect Upstox" if not _current_upstox().connected
+                        else "Upstox unavailable")
+      errors[index] = str(exc)
+    except DataProviderError as exc:
+      values[index] = None
+      sources[index] = "Unavailable"
+      errors[index] = str(exc)
   return {
-      "values": {index: f"{value:,.2f}" for index, value in values.items()},
+      "values": values,
+      "sources": sources,
+      "errors": errors,
       "updated_at": datetime.now(timezone.utc).isoformat(),
   }
 
 
 def snapshot(index):
   """Build table, PCR and strike markers from one option-chain payload."""
-  json_obj = _option_chain_json(index)
+  json_obj, source = _provider_option_chain_json(index)
   underlying = _underlying_value(json_obj, index)
   result_df = _prepared_dataframe(json_obj, underlying)
   levels = calculate_levels(result_df, underlying)
@@ -297,6 +496,8 @@ def snapshot(index):
       ),
       "pcr": _pcr_from_dataframe(result_df, underlying),
       "levels": levels,
+      "source": source,
+      "expiry": json_obj["records"].get("expiryDate"),
       "source_timestamp": json_obj["records"].get("timestamp"),
       "updated_at": datetime.now(timezone.utc).isoformat(),
   }
@@ -330,7 +531,7 @@ def raw_to_dataframe(json_obj):
   put_rows = _option_rows(json_obj, "PE")
   call_rows = _option_rows(json_obj, "CE")
   if not put_rows or not call_rows:
-    raise NSEDataError("NSE returned an incomplete option-chain response.")
+    raise DataProviderError("The provider returned an incomplete option-chain response.")
 
   po = pd.DataFrame.from_records(put_rows)[[
       "strikePrice", "pChange", "lastPrice", "totalTradedVolume",
@@ -375,6 +576,6 @@ def raw_to_dataframe(json_obj):
 
 
 def pcr(index):
-  json_obj = _option_chain_json(index)
+  json_obj, _ = _provider_option_chain_json(index)
   underlying = _underlying_value(json_obj, index)
   return _pcr_from_dataframe(raw_to_dataframe(json_obj), underlying)

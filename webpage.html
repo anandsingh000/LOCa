@@ -156,7 +156,7 @@
             cursor: pointer;
         }
 
-        #live-status {
+        #live-status, #quote-status {
             box-sizing: border-box;
             width: calc(100% - 20px);
             margin: 8px 10px;
@@ -164,6 +164,35 @@
             color: whitesmoke;
             text-align: right;
             font-size: 0.9rem;
+        }
+
+        #upstox-controls {
+            box-sizing: border-box;
+            width: calc(100% - 20px);
+            margin: 8px 10px;
+            color: whitesmoke;
+            text-align: center;
+        }
+
+        #upstox-status {
+            margin-right: 8px;
+        }
+
+        #upstox-controls button {
+            padding: 5px 10px;
+            border: 1px solid mediumseagreen;
+            border-radius: 5px;
+            background: rgb(111, 224, 220);
+            cursor: pointer;
+        }
+
+        #upstox-controls button[hidden] {
+            display: none;
+        }
+
+        #upstox-controls button:disabled {
+            cursor: not-allowed;
+            opacity: 0.65;
         }
 
         #refreshData {
@@ -220,6 +249,8 @@
         let snapshotRequestNumber = 0;
         let autoRefreshTimer = null;
         let selectedStrikeKey = null;
+        let quotesRequest = null;
+        let snapshotLoading = false;
 
         function renderPcr(items) {
             const html = (items || []).map((item) =>
@@ -232,7 +263,10 @@
         }
 
         function fetchQuotes() {
-            return fetch("/quotes", { cache: "no-store" })
+            if (quotesRequest) {
+                return quotesRequest;
+            }
+            quotesRequest = fetch("/quotes", { cache: "no-store" })
                 .then((response) => {
                     if (!response.ok) {
                         throw new Error("Unable to load index values");
@@ -241,20 +275,79 @@
                 })
                 .then((payload) => {
                     const values = payload.values || {};
-                    ["NIFTY", "BANKNIFTY", "FINNIFTY"].forEach((index) => {
+                    ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"].forEach((index) => {
                         const target = document.getElementById(
                             index === "NIFTY" ? "nifty_value" :
                             index === "BANKNIFTY" ? "banknifty_value" :
-                            "finnifty_value"
+                            index === "FINNIFTY" ? "finnifty_value" :
+                            "sensex_value"
                         );
-                        target.textContent = values[index] || "Unavailable";
+                        if (!target) {
+                            return;
+                        }
+                        target.textContent = values[index] ||
+                            payload.sources?.[index] || "Unavailable";
                     });
+                    const sourceLabels = Object.entries(payload.sources || {})
+                        .map(([index, source]) => index + ": " + source);
+                    if (sourceLabels.length) {
+                        document.getElementById("quote-status").textContent =
+                            sourceLabels.join(" · ");
+                    }
                     return payload;
                 })
                 .catch(() => {
-                    document.getElementById("live-status").textContent =
-                        "Live NSE quote update is temporarily unavailable.";
+                    document.getElementById("quote-status").textContent =
+                        "Live quote update is temporarily unavailable.";
+                })
+                .finally(() => {
+                    quotesRequest = null;
                 });
+            return quotesRequest;
+        }
+
+        function updateUpstoxStatus() {
+            return fetch("/upstox/status", { cache: "no-store" })
+                .then((response) => {
+                    if (!response.ok) {
+                        throw new Error("Unable to load connection status");
+                    }
+                    return response.json();
+                })
+                .then((status) => {
+                    const statusTarget = document.getElementById("upstox-status");
+                    const connectButton = document.getElementById("connectUpstox");
+                    const disconnectButton = document.getElementById("disconnectUpstox");
+                    statusTarget.textContent = status.message ||
+                        "Upstox connection status unavailable.";
+                    connectButton.hidden = !status.can_connect || status.connected;
+                    disconnectButton.hidden = !status.can_disconnect;
+                    return status;
+                })
+                .catch(() => {
+                    document.getElementById("upstox-status").textContent =
+                        "Unable to check Upstox connection status.";
+                });
+        }
+
+        function disconnectUpstox() {
+            return fetch("/upstox/disconnect", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" }
+            })
+                .then((response) => {
+                    if (!response.ok) {
+                        throw new Error("Unable to disconnect Upstox");
+                    }
+                    return updateUpstoxStatus();
+                })
+                .then(() => {
+                    fetchQuotes();
+                    if (activeIndex) {
+                        fetchTable(activeIndex);
+                    }
+                })
+                .catch((error) => setLiveStatus(error.message, true));
         }
 
         function widthStorageKey(index) {
@@ -506,8 +599,17 @@
             setupResizableColumns(activeTableIndex);
         }
 
-        function setLiveStatus(message) {
-            document.getElementById("live-status").innerHTML = message;
+        function setLiveStatus(message, showRefresh = false) {
+            const target = document.getElementById("live-status");
+            target.textContent = message;
+            if (showRefresh) {
+                const button = document.createElement("button");
+                button.id = "refreshData";
+                button.type = "button";
+                button.textContent = "Refresh now";
+                button.addEventListener("click", () => fetchTable(activeIndex));
+                target.appendChild(button);
+            }
         }
 
         function formatUpdatedAt(snapshot) {
@@ -515,11 +617,24 @@
             if (!source) {
                 return "Updated just now";
             }
-            return "NSE data: " + source;
+            return (snapshot.source || "Live") + " data: " + source;
         }
 
         function fetchTable(endpoint, options = {}) {
+            if (options.silent && snapshotLoading) {
+                return;
+            }
+            const container = document.getElementById("optionChainTable");
+            if (activeIndex !== endpoint) {
+                selectedStrikeKey = null;
+                activeTable = null;
+                activeTableIndex = null;
+                container.textContent = "Loading " + endpoint + " option chain...";
+                document.getElementById("put_call_ratio").textContent = "";
+                document.getElementById("table-tools").style.display = "none";
+            }
             activeIndex = endpoint;
+            snapshotLoading = true;
             const requestNumber = ++snapshotRequestNumber;
             const silent = options.silent === true;
             if (!silent) {
@@ -528,43 +643,54 @@
                 setLiveStatus("Refreshing " + endpoint + " data...");
             }
 
-            fetch("/snapshot/" + endpoint, { cache: "no-store" })
-                .then((response) => {
+            const request = fetch("/snapshot/" + endpoint, { cache: "no-store" })
+                .then(async (response) => {
+                    const payload = await response.json();
                     if (!response.ok) {
-                        throw new Error("Unable to load option chain");
+                        throw new Error(payload.error || "Unable to load option chain");
                     }
-                    return response.json();
+                    return payload;
                 })
                 .then((snapshot) => {
                     if (requestNumber !== snapshotRequestNumber) {
                         return;
                     }
-                    document.getElementById("optionChainTable").innerHTML =
-                        snapshot.table_html;
+                    const scrollTop = container.scrollTop;
+                    const scrollLeft = container.scrollLeft;
+                    container.innerHTML = snapshot.table_html;
                     setupResizableColumns(endpoint);
                     enableRowSelection();
+                    container.scrollTop = scrollTop;
+                    container.scrollLeft = scrollLeft;
                     renderPcr(snapshot.pcr);
                     setLiveStatus(
                         formatUpdatedAt(snapshot) +
-                        " · auto-refresh every 15 seconds" +
-                        " <button id='refreshData' type='button'>Refresh now</button>"
-                    );
-                    document.getElementById("refreshData").addEventListener(
-                        "click", () => fetchTable(activeIndex)
+                        (snapshot.expiry ? " · expiry " + snapshot.expiry : "") +
+                        " · auto-refresh every 15 seconds", true
                     );
                 })
-                .catch(() => {
+                .catch((error) => {
                     if (requestNumber !== snapshotRequestNumber) {
                         return;
                     }
+                    const showingPrevious = activeTableIndex === endpoint;
+                    if (!showingPrevious) {
+                        container.textContent = error.message;
+                    }
                     setLiveStatus(
-                        "Live option-chain data is temporarily unavailable. " +
-                        "Please try Refresh now."
+                        (showingPrevious ? "Showing last successful table. " : "") +
+                        error.message, true
                     );
+                })
+                .finally(() => {
+                    if (requestNumber === snapshotRequestNumber) {
+                        snapshotLoading = false;
+                    }
                 });
             if (options.skipQuotes !== true) {
                 fetchQuotes();
             }
+            return request;
         }
 
         function startAutoRefresh() {
@@ -582,6 +708,10 @@
                 "click", resetColumnWidths
             );
             fetchQuotes();
+            updateUpstoxStatus();
+            document.getElementById("disconnectUpstox").addEventListener(
+                "click", disconnectUpstox
+            );
             startAutoRefresh();
         });
     </script>
@@ -596,11 +726,26 @@
             <button onclick="fetchTable('FINNIFTY')" class="index-button">
                 <b>FINNIFTY</b> <br> <div id="finnifty_value"></div>
             </button>
+            <button onclick="fetchTable('SENSEX')" class="index-button">
+                <b>SENSEX</b> <br> <div id="sensex_value"></div>
+            </button>
           <br>
           <br>
             <ul id="put_call_ratio">
             </ul>
         </center>
+
+    <div id="upstox-controls" role="status" aria-live="polite">
+        <span id="upstox-status">Checking Upstox connection...</span>
+        <button id="connectUpstox" type="button" hidden
+            onclick="window.location.href='/upstox/connect'">
+            Connect Upstox
+        </button>
+        <button id="disconnectUpstox" type="button" hidden>
+            Disconnect
+        </button>
+    </div>
+    <div id="quote-status" role="status" aria-live="polite"></div>
     
   <br>
   <br>

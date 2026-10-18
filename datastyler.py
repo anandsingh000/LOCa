@@ -9,14 +9,20 @@ gradientCMAP = LinearSegmentedColormap.from_list('rg', ["r", "w", "g"], N=256)
 
 
 def BrEv_style(table, subset, nifty=0):
-  a = list(table[subset].sort_values())
-  for i in range(0,len(a)):
-    if a[i] > nifty:
-      nearestLow_BrEv, nearestHigh_BrEv = a[i-1], a[i]
-      break
-    else:
-      continue
-  return list((nearestLow_BrEv, nearestHigh_BrEv))
+  values = list(table[subset].sort_values())
+  if not values:
+    return [nifty, nifty]
+
+  for i, value in enumerate(values):
+    if value > nifty:
+      if i == 0:
+        return [value, value]
+      return [values[i - 1], value]
+
+  # The table can be a narrow/mocked chain whose break-even values all sit
+  # below the underlying. Keep styling deterministic instead of failing while
+  # searching for a non-existent upper neighbour.
+  return [values[-1], values[-1]]
 
 
 def background_with_norm(s, cmapCustom):
