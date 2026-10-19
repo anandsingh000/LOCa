@@ -84,9 +84,9 @@ class UpstoxDashboardTests(unittest.TestCase):
     self.assertIn("Upstox", response.get_json()["error"])
 
   def test_oi_display_values_are_rounded_to_whole_numbers(self):
-    self.assertEqual(ds._format_whole_number(1000.4), "1,000")
-    self.assertEqual(ds._format_whole_number(1000.6), "1,001")
-    self.assertEqual(ds._format_whole_number(-1000.6), "-1,001")
+    self.assertEqual(ds._format_lakh(1500000), "15 lakh")
+    self.assertEqual(ds._format_lakh(503945), "5 lakh")
+    self.assertEqual(ds._format_lakh(-154310), "-2 lakh")
 
   def test_sensex_uses_nearest_available_expiry(self):
     upstox.access_token = "analytics-test-token"

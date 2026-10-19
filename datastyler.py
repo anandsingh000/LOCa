@@ -68,15 +68,17 @@ def _format_strike(value, strike_markers):
   )
 
 
+def _format_lakh(value):
+  """Display a signed value as rounded Indian lakhs without changing calculations."""
+  numeric_value = float(value)
+  sign = "-" if numeric_value < 0 else ""
+  lakhs = math.floor(abs(numeric_value) / 100000 + 0.5)
+  return f"{sign}{lakhs} lakh"
+
+
 def _format_volume_lakh(value):
   """Display volume as rounded Indian lakhs without changing calculations."""
-  lakhs = math.floor(float(value) / 100000 + 0.5)
-  return f"{lakhs} lakh"
-
-
-def _format_whole_number(value):
-  """Display OI values as rounded whole numbers without changing calculations."""
-  return f"{round(float(value)):,}"
+  return _format_lakh(value)
 
 
 def prettier(df, index="NIFTY", nifty_value=None, strike_markers=None):
@@ -118,10 +120,10 @@ def prettier(df, index="NIFTY", nifty_value=None, strike_markers=None):
           'STRIKE': lambda value: _format_strike(value, strike_markers),
           'VOLUME_c': _format_volume_lakh,
           'VOLUME_p': _format_volume_lakh,
-          'CHNG_OI_c': _format_whole_number,
-          'openInterest_c': _format_whole_number,
-          'CHNG_OI_p': _format_whole_number,
-          'openInterest_p': _format_whole_number,
+          'CHNG_OI_c': _format_lakh,
+          'openInterest_c': _format_lakh,
+          'CHNG_OI_p': _format_lakh,
+          'openInterest_p': _format_lakh,
       },
   ).set_properties(**{
                              'text-align': 'center',
