@@ -5,6 +5,7 @@ from unittest.mock import patch
 import requests
 
 import dataparser as dp
+import datastyler as ds
 from main import app
 from upstox_client import UpstoxClient, UpstoxError, upstox
 
@@ -81,6 +82,11 @@ class UpstoxDashboardTests(unittest.TestCase):
     response = self.client.get("/snapshot/SENSEX")
     self.assertEqual(response.status_code, 503)
     self.assertIn("Upstox", response.get_json()["error"])
+
+  def test_oi_display_values_are_rounded_to_whole_numbers(self):
+    self.assertEqual(ds._format_whole_number(1000.4), "1,000")
+    self.assertEqual(ds._format_whole_number(1000.6), "1,001")
+    self.assertEqual(ds._format_whole_number(-1000.6), "-1,001")
 
   def test_sensex_uses_nearest_available_expiry(self):
     upstox.access_token = "analytics-test-token"

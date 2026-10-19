@@ -74,6 +74,11 @@ def _format_volume_lakh(value):
   return f"{lakhs} lakh"
 
 
+def _format_whole_number(value):
+  """Display OI values as rounded whole numbers without changing calculations."""
+  return f"{round(float(value)):,}"
+
+
 def prettier(df, index="NIFTY", nifty_value=None, strike_markers=None):
   strike_markers = strike_markers or {}
   if nifty_value is None:
@@ -113,6 +118,10 @@ def prettier(df, index="NIFTY", nifty_value=None, strike_markers=None):
           'STRIKE': lambda value: _format_strike(value, strike_markers),
           'VOLUME_c': _format_volume_lakh,
           'VOLUME_p': _format_volume_lakh,
+          'CHNG_OI_c': _format_whole_number,
+          'openInterest_c': _format_whole_number,
+          'CHNG_OI_p': _format_whole_number,
+          'openInterest_p': _format_whole_number,
       },
   ).set_properties(**{
                              'text-align': 'center',
